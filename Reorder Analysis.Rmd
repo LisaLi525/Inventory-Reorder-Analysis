@@ -1,6 +1,3 @@
-Your R script for text clustering can be improved for better flow and clarity. Here's a revised version:
-
-```r
 ---
 title: "Introductory Tutorial to Text Clustering with R"
 output:
@@ -95,5 +92,3 @@ plot_clusters(mds_points, cutree(hclust_result, num_clusters), "Hierarchical Clu
 plot_clusters(mds_points, dbscan_result$cluster, "Density-Based Clustering")
 # [Add stacked clustering plot here]
 ```
-
-This version organizes the script into clear sections, applies best practices for R coding, and simplifies some processes for readability and performance. Remember to replace placeholders like `"/path/to/data.csv"` and `"text_column"` with actual values specific to your data.
