@@ -1,94 +1,104 @@
 ---
-title: "Introductory Tutorial to Text Clustering with R"
-output:
-  html_document:
-    df_print: paged
+title: "Reorder Analysis"
+author: "Lisa Li"
+date: "2/23/2021"
+output: html_document
 ---
 
-# Initialization
-```{r Initialization}
-# Clean environment and set options
-rm(list = ls())
-options(stringsAsFactors = FALSE, fileEncoding = "UTF-8")
-
-# Load and install required packages
-required_packages <- c("tm", "dbscan", "proxy", "colorspace", "quanteda", "magrittr", "dplyr", "SnowballC")
-new_packages <- required_packages[!(required_packages %in% installed.packages()[,"Package"])]
-if(length(new_packages)) install.packages(new_packages)
-lapply(required_packages, library, character.only = TRUE)
+# Setup
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+rm(list=ls())
 ```
 
-# Data Loading
-```{r Load Data}
-# Load data from CSV file
-data_path <- "/path/to/data.csv"
-data_frame <- read.csv(data_path, stringsAsFactors = FALSE)
+# Load Libraries
+```{r Load Libraries}
+library(RPostgreSQL)
+library(dplyr)
+library(dbplyr)
+library(data.table)
+library(lubridate)
+library(reshape2)
+library(stringr)
+library(readxl)
+library(writexl)
+library(openxlsx)
+library(tidyverse)
+library(odbc)
 ```
 
-# Dataset Overview
-The dataset consists of health news tweets from 16 different sources. Our objective is to perform text clustering to categorize these tweets.
+# Database Connection and Data Loading
+```{r Data Loading}
+# Establishing connection to SQL Server
+con_sql <- DBI::dbConnect(odbc::odbc(),
+                          Driver   = "SQL Server",
+                          Server   = "<server_ip>",
+                          Database = "PROCUREMENTDB",
+                          UID      = "<user_id>",
+                          PWD      = "<password>",
+                          Port     = 1433)
 
-# Data Preprocessing
-```{r Preprocessing}
-# Select relevant columns and clean text data
-cleaned_data <- data_frame %>%
-  mutate(clean_text = gsub("[^[:alnum:]]", " ", text_column),
-         clean_text = gsub(" +", " ", clean_text))
-
-# Create a quanteda corpus
-corpus <- quanteda::corpus(cleaned_data$clean_text)
-
-# Apply text preprocessing
-corpus <- corpus %>%
-  quanteda::tokens(remove_punct = TRUE, remove_numbers = TRUE) %>%
-  quanteda::tokens_tolower() %>%
-  quanteda::tokens_remove(stopwords("english")) %>%
-  quanteda::tokens_wordstem(language = "english")
+# Fetching data from various SQL queries
+inventory_report <- DBI::dbGetQuery(con_sql, "SELECT I.item_no, I.whse_code, SUM(I.instock_inventory) AS instock_inventory FROM PROCUREMENTDB.Retail.InventoryReportView I GROUP BY I.item_no, I.whse_code")
+opendemand_report <- DBI::dbGetQuery(con_sql, "SELECT Isbn, SUM(OpenQuantity) AS Open_Quantity FROM PROCUREMENTDB.Retail.OpenQuantityView GROUP BY Isbn")
+sku_list <- DBI::dbGetQuery(con_sql, "SELECT * FROM Retail.SkuCategoryPriceView")
+fifo_data <- DBI::dbGetQuery(con_sql, "SELECT MAX(F.FIFO) AS FIFO, F.ISBN AS item_no FROM PROCUREMENTDB.Retail.FIFO F GROUP BY F.ISBN")
 ```
 
-# Text Representation
-```{r Text Representation}
-# Create a document-term matrix
-dtm <- quanteda::dfm(corpus)
+# Business Report Cleaning
+```{r Business Report Cleaning}
+# Reading and cleaning the business report
+sku_orders_adhoc_all <- read.csv("<path_to_csv>/BusinessReport-2-23-21.csv")
+sku_orders_adhoc_all <- sku_orders_adhoc_all %>% 
+  mutate(across(where(is.character), ~as.numeric(gsub("[/$,]", "", .x))))
 
-# Apply TF-IDF weighting
-dtm_tfidf <- quanteda::dfm_tfidf(dtm)
+# Sum of total orders
+total_orders <- sum(sku_orders_adhoc_all$Units.Ordered, na.rm = TRUE)
 ```
 
-# Clustering
-```{r Clustering}
-# Define the number of clusters
-num_clusters <- 16
-
-# K-means clustering
-kmeans_result <- kmeans(dtm_tfidf, centers = num_clusters)
-
-# Hierarchical clustering
-distance_matrix <- proxy::dist(dtm_tfidf, method = "cosine")
-hclust_result <- hclust(distance_matrix, method = "ward.D2")
-
-# Density-based clustering (HDBSCAN)
-dbscan_result <- dbscan::hdbscan(distance_matrix, minPts = 10)
-
-# Stacked clustering
-# [Add stacked clustering logic here]
+# Data Sources Cleaning
+```{r Data Sources Cleaning}
+# Transforming and cleaning inventory report
+inventory_report <- inventory_report %>%
+  pivot_wider(names_from = whse_code, values_from = instock_inventory, values_fill = list(instock_inventory = 0)) %>%
+  mutate(Amazon_Instock = FBA_AW + FBA_TR,
+         Warehouse_Instock= AW + FBM + TB + `TB-2` + TR,
+         Instock_Inventory = Amazon_Instock + Warehouse_Instock) %>%
+  select(item_no, Instock_Inventory, Warehouse_Instock, Amazon_Instock)
 ```
 
-# Visualization
-```{r Visualization}
-# Multi-dimensional scaling for 2D representation
-mds_points <- cmdscale(distance_matrix, k = 2)
+# Sale Data Information Combination
+```{r Sale Data Combination}
+# Combining SKU list with orders data
+combined_data <- sku_orders_adhoc_all %>%
+  group_by(SKU) %>%
+  summarize(across(Sessions:Buy.Box.Percentage, sum, na.rm = TRUE), .groups = 'drop') %>%
+  left_join(sku_list, by = c("SKU" = "Sku")) %>%
+  rename_with(~str_replace(., "\\.", "_"), everything()) %>%
+  filter(!is.na(Isbn))
 
-# Plotting clusters
-palette <- colorspace::diverge_hcl(num_clusters)
-plot_clusters <- function(points, labels, main_title) {
-  plot(points, col = palette[as.factor(labels)], pch = 19, main = main_title)
-}
+# Joining with inventory report and open demand report
+sku_velocity <- combined_data %>%
+  full_join(inventory_report, by = c("Isbn" = "item_no")) %>%
+  left_join(opendemand_report, by = "Isbn") %>%
+  replace_na(list(across(everything(), ~0)))
+```
 
-# Display plots
-par(mfrow = c(2, 2))
-plot_clusters(mds_points, kmeans_result$cluster, "K-Means Clustering")
-plot_clusters(mds_points, cutree(hclust_result, num_clusters), "Hierarchical Clustering")
-plot_clusters(mds_points, dbscan_result$cluster, "Density-Based Clustering")
-# [Add stacked clustering plot here]
+# Final Data Cleaning and Writing
+```{r Final Data Cleaning and Writing}
+# Aggregating and cleaning the final data
+isbn_velocity <- sku_velocity %>%
+  group_by(Isbn) %>%
+  summarize(across(Amz_Pageviews:Open_Quantity, sum, na.rm = TRUE), 
+            Velocity = sum(Amz_Units)/7,
+            Excess_Qty = (sum(Instock_Inventory) + sum(Open_Quantity)) - sum(Amz_Units)/7*90,
+            .groups = 'drop') %>%
+  left_join(fifo_data, by = c("Isbn" = "item_no")) %>%
+  replace_na(list(FIFO = 0))
+
+# Writing the final data to Excel
+output_path <- "<path_to_output>/Reorder Analysis_2021-02-23.xlsx"
+write.xlsx(isbn_velocity,
+
+ sheetName = "Reorder Analysis", output_path)
 ```
